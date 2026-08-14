@@ -1,2 +1,70 @@
-# amiibo-generator
-Amiibo generator
+# 🛡️ Amiibo Generator Pro
+
+[![Platform: Web](https://img.shields.io/badge/Platform-Web-blue.svg)](https://little-night-wolf.github.io/amiibo-generator/)
+
+**Amiibo Generator Pro** is a high-performance web tool designed to generate binary files (.bin) compatible with NFC figure emulators and management tools. It creates 100% exact, blank, vanilla NTAG215 raw dumps perfectly mirroring an unmodified physical chip.
+
+---
+
+## 🔬 The Science of Amiibo Reverse Engineering
+
+To understand how this tool generates functional files from just an ID, we must look at the underlying hardware and data structures.
+
+### 1. NTAG215 Memory Structure
+Real Amiibos utilize the **NXP NTAG215** standard, a memory-rich NFC tag with 540 bytes of capacity. The data is organized into 4-byte pages:
+* **UID (Unique Identifier):** The first 9 bytes identify the physical tag. Our generator creates valid UIDs with correct BCC (Block Check Character) bytes to satisfy NTAG215 specifications.
+* **Amiibo ID:** A 16-character hex string (8 bytes) that defines the character identity (e.g., Link, Mario, Zelda).
+* **Static & Dynamic Locks:** Specific bits that prevent the data from being overwritten, which are replicated by this tool to ensure compatibility.
+
+### 2. How this Generator Works
+By leveraging databases like **AmiiboAPI** and community research from projects like **TagMo**, we can reconstruct a character's "digital DNA".
+1.  **ID Injection:** The tool takes the character's Head and Tail IDs and places them at specific offsets (typically `0x54` and `0x1DC`).
+2.  **Format Adaptation:**
+    * **Vanilla Dump:** Generates an exact 540-byte raw structure perfectly mirroring a freshly unboxed NTAG215 chip.
+4.  **BCC Calculation:** The script automatically calculates the internal checksums required for the NFC controller to accept the dump as a valid NTAG215.
+
+---
+
+## 🚀 Key Features
+
+* **Vanilla Generation:** Generates 100% accurate, bit-by-bit vanilla 540-byte files representing a completely new and unmodified Amiibo.
+* **Advanced Mode:** Full control over the hex UID for custom generation.
+* **Batch Processing:** Generate and download entire series as organized ZIP files.
+* **Leaked Data Support:** Includes an `extras.json` file to support leaked or unreleased Amiibos (like Mineru's Construct) not yet available.
+
+---
+
+## 🛠️ Usage & Compatibility Guide
+
+### ⚠️ Important Disclaimer
+If you don't provide this tool a working `key_retail.bin` files will be **unencrypted** wich means that is useless in some situations, so if you don't encrypt the generated amiibos from this tool in order to properly use this amiibos you will need to use another app.
+
+### External apps to encrypt/modify the amiibos
+
+| Platform | Recommended Tool | Process |
+| :--- | :--- | :--- |
+| **Android** | [TagMo](https://github.com/HiddenRamblings/TagMo) | Import the .bin. TagMo will use your retail keys to encrypt and write the data to a physical NTAG215 tag. |
+| **PC** | [Amiitool](https://github.com/socram8888/amiitool) | Use this command-line tool to encrypt the raw dump before using it in emulators like Ryujinx or Cemu. |
+| **iOS** | Amiiboss / Ally | Third-party apps available on the App Store for managing NFC dumps. |
+| **Nintendo 3DS** | [Wumiibo](https://github.com/hax0kartik/wumiibo) | Place the generated files directly into `sd:/wumiibo/`. No manual encryption is usually required for this CFW. |
+
+---
+
+## 📂 Project Structure
+
+* `index.html`: Bootstrapped UI with DataTables for lightning-fast character searching.
+* `script.js`: The core engine. Handles Hex-to-Bytes conversion, BCC calculation, and ZIP generation.
+* `extras.json`: Local database for custom entries and early-access Amiibo data.
+* `maboii.js`: A JavaScrypt compiled version of original [maboii.js](https://github.com/Entrivax/maboii.js) library (Original by [Entrivax](https://github.com/Entrivax) in TypeScript) converted and adapted by [christopher-roelofs](https://github.com/christopher-roelofs)
+
+---
+
+## 🤝 Credits
+
+* **[hax0kartik](https://github.com/hax0kartik/amiibo-generator):** The original amiibo-generator.
+* **[kevinbrewster](https://kevinbrewster.github.io/Amiibo-Reverse-Engineering/):** For the Amiibo reverse engineering.
+* **[AmiiboAPI](https://amiiboapi.org/):** The primary source for character metadata.
+* **[maboii.js](https://github.com/Entrivax/maboii.js):** For the JavaScript-based encryption system.
+
+---
+*Note: This software is for educational and preservation purposes only. No proprietary keys or copyrighted assets are included.*
