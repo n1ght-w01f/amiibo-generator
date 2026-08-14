@@ -1,0 +1,2 @@
+# amiibo-generator
+Amiibo generator
