@@ -36,7 +36,7 @@
         .badge-origin { font-size: 0.85em; padding: 5px 10px; margin-right: 4px; margin-bottom: 4px; display: inline-block; text-transform: uppercase; letter-spacing: 0.5px; }
         .type-icon { font-size: 0.8em; vertical-align: middle; margin-right: 4px; color: #aaa; }
         
-        /* Multi-API Duplicate Row Expander (Improved Hitbox & Layout) */
+        /* Multi-API Duplicate Row Expander */
         td.details-control { cursor: pointer; text-align: center; vertical-align: middle; width: 60px; padding: 0 !important; }
         .details-control-wrapper { display: flex; align-items: center; justify-content: center; gap: 6px; width: 100%; height: 100%; min-height: 40px; padding: 10px; }
         .details-control-wrapper::before { content: '►'; color: #888; font-size: 0.9em; transition: transform 0.2s ease; display: inline-block; }
@@ -66,10 +66,12 @@
         .toast-info { border-color: var(--accent-blue); }
         .toast-warning { border-color: #ffc107; }
 
-        /* Hide default DataTables search bar safely */
+        /* Hex Viewer Table */
+        .hex-table { font-family: 'Courier New', Courier, monospace; font-size: 0.82rem; }
+        .hex-table th, .hex-table td { padding: 4px 8px !important; }
+
         .dataTables_filter { display: none !important; }
         
-        /* Responsive Tweaks */
         @media (max-width: 768px) {
             .tool-section { padding: 15px; }
             .btn-group-responsive { display: flex; flex-direction: column; width: 100%; gap: 10px; }
@@ -186,8 +188,22 @@
                     <h2 class="text-success mb-0">Amiibo Deep Analyzer</h2>
                     <button class="btn btn-outline-light btn-sm" onclick="switchTool('main')">✖ Close</button>
                 </div>
-                <p class="text-muted mb-4">Scan any .bin to verify encryption, extract internal IDs, read signatures, and extract AppData (Nickname & Mii Owner).</p>
+                <p class="text-muted mb-4">Scan any .bin file to extract security status, NTAG hardware parameters, Mii/Owner registry, game saved data, and raw bit-by-bit hex structures.</p>
                 
+                <div class="row mb-3" id="analyzerModeSelector" style="display: none;">
+                    <div class="col-md-4 offset-md-8 text-right">
+                        <div class="input-group input-group-sm">
+                            <div class="input-group-prepend">
+                                <span class="input-group-text bg-dark text-muted border-secondary">Analysis Mode:</span>
+                            </div>
+                            <select id="analyzerViewMode" class="form-control bg-dark text-white border-secondary" onchange="updateAnalyzerView()">
+                                <option value="basic" selected>Basic Analysis</option>
+                                <option value="advanced">Advanced Analysis (Detailed + Hex Grid)</option>
+                            </select>
+                        </div>
+                    </div>
+                </div>
+
                 <div class="row">
                     <div class="col-md-4 mb-4 mb-md-0">
                         <div class="drop-zone h-100 d-flex flex-column justify-content-center" id="analyzerDropZone">
@@ -200,49 +216,136 @@
                     <div class="col-md-8">
                         <div id="resultBox" class="result-box">
                             <h6 class="text-white border-bottom border-secondary pb-2 mb-3">Scan Results</h6>
-                            <div class="row">
-                                <div class="col-sm-4 text-center mb-3 mb-sm-0">
-                                    <img id="resImage" src="./favicon.svg" class="img-fluid rounded mb-2 bg-dark p-1">
-                                    <h6 id="resName" class="text-white mb-0 small font-weight-bold">---</h6>
-                                    <small id="resSeries" class="text-muted d-block">---</small>
-                                </div>
-                                
-                                <div class="col-sm-8">
-                                    <div class="data-label">Security Status</div>
-                                    <div id="resStatus" class="mb-3"><span class="badge badge-secondary">Waiting for file...</span></div>
-
-                                    <div class="row">
-                                        <div class="col-6">
-                                            <div class="data-label">Amiibo ID</div>
-                                            <div id="resID" class="data-value small">...</div>
-                                        </div>
-                                        <div class="col-6">
-                                            <div class="data-label">Internal UID</div>
-                                            <div id="resUID" class="data-value small">...</div>
-                                        </div>
+                            
+                            <div id="analyzerBasicView">
+                                <div class="row">
+                                    <div class="col-sm-4 text-center mb-3 mb-sm-0">
+                                        <img id="resImage" src="./favicon.svg" class="img-fluid rounded mb-2 bg-dark p-1">
+                                        <h6 id="resName" class="text-white mb-0 small font-weight-bold">---</h6>
+                                        <small id="resSeries" class="text-muted d-block">---</small>
                                     </div>
                                     
-                                    <div class="row border-top border-secondary pt-2 mt-1">
-                                        <div class="col-6">
-                                            <div class="data-label">👤 Mii Owner</div>
-                                            <div id="resMii" class="data-value highlight">...</div>
+                                    <div class="col-sm-8">
+                                        <div class="data-label">Security Status</div>
+                                        <div id="resStatus" class="mb-3"><span class="badge badge-secondary">Waiting for file...</span></div>
+
+                                        <div class="row">
+                                            <div class="col-6">
+                                                <div class="data-label">Amiibo ID</div>
+                                                <div id="resID" class="data-value small">...</div>
+                                            </div>
+                                            <div class="col-6">
+                                                <div class="data-label">Internal UID</div>
+                                                <div id="resUID" class="data-value small">...</div>
+                                            </div>
                                         </div>
-                                        <div class="col-6">
-                                            <div class="data-label">🏷️ Amiibo Nickname</div>
-                                            <div id="resNickname" class="data-value highlight">...</div>
+                                        
+                                        <div class="row border-top border-secondary pt-2 mt-1">
+                                            <div class="col-6">
+                                                <div class="data-label">👤 Mii Owner</div>
+                                                <div id="resMii" class="data-value highlight">...</div>
+                                            </div>
+                                            <div class="col-6">
+                                                <div class="data-label">🏷️ Amiibo Nickname</div>
+                                                <div id="resNickname" class="data-value highlight">...</div>
+                                            </div>
+                                        </div>
+
+                                        <div id="resSigContainer" style="display: none;">
+                                            <div class="data-label mt-1">Custom Signature</div>
+                                            <div id="resSigText" class="data-value small mb-0 text-warning">...</div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div id="analyzerAdvancedView" style="display: none;">
+                                <div class="d-flex align-items-center mb-3">
+                                    <img id="advResImage" src="./favicon.svg" class="rounded mr-3 bg-dark p-1" style="max-height: 60px;">
+                                    <div>
+                                        <h5 id="advResName" class="text-white mb-0 font-weight-bold">---</h5>
+                                        <small id="advResSeries" class="text-muted">---</small>
+                                    </div>
+                                </div>
+
+                                <ul class="nav nav-tabs border-secondary mb-3" id="advTabs" role="tablist">
+                                    <li class="nav-item">
+                                        <a class="nav-link active bg-dark text-white border-secondary" id="tab-overview" data-toggle="tab" href="#advOverview" role="tab">📊 General & NTAG</a>
+                                    </li>
+                                    <li class="nav-item">
+                                        <a class="nav-link bg-dark text-white border-secondary ml-1" id="tab-appdata" data-toggle="tab" href="#advAppData" role="tab">🎮 AppData & Mii</a>
+                                    </li>
+                                    <li class="nav-item">
+                                        <a class="nav-link bg-dark text-white border-secondary ml-1" id="tab-hex" data-toggle="tab" href="#advHexGrid" role="tab">🔢 Hex Grid Viewer</a>
+                                    </li>
+                                </ul>
+
+                                <div class="tab-content">
+                                    <div class="tab-pane fade show active" id="advOverview" role="tabpanel">
+                                        <div class="row">
+                                            <div class="col-md-6">
+                                                <div class="data-label">Full Amiibo ID (16 Hex)</div>
+                                                <div id="advFullID" class="data-value small">...</div>
+                                                <div class="data-label">Head / Tail Breakdown</div>
+                                                <div id="advHeadTail" class="data-value small text-muted">...</div>
+                                                <div class="data-label">NXP NTAG215 UID</div>
+                                                <div id="advFullUID" class="data-value small">...</div>
+                                            </div>
+                                            <div class="col-md-6">
+                                                <div class="data-label">Security & Integrity</div>
+                                                <div id="advSecBadge" class="mb-2">...</div>
+                                                <div class="data-label">Write Counter</div>
+                                                <div id="advWriteCount" class="data-value small">...</div>
+                                                <div class="data-label">Setup / Last Mod Dates</div>
+                                                <div id="advDates" class="data-value small">...</div>
+                                            </div>
                                         </div>
                                     </div>
 
-                                    <div class="data-label mt-1">Custom Signature</div>
-                                    <div id="resSigText" class="data-value small mb-0 text-warning">...</div>
+                                    <div class="tab-pane fade" id="advAppData" role="tabpanel">
+                                        <div class="row">
+                                            <div class="col-md-6">
+                                                <div class="data-label">Amiibo Nickname</div>
+                                                <div id="advNick" class="data-value highlight">...</div>
+                                                <div class="data-label">Mii Owner Name</div>
+                                                <div id="advMiiName" class="data-value highlight">...</div>
+                                                <div class="data-label">Mii Author Name</div>
+                                                <div id="advMiiAuthor" class="data-value small">...</div>
+                                            </div>
+                                            <div class="col-md-6">
+                                                <div class="data-label">Mii Unique ID</div>
+                                                <div id="advMiiID" class="data-value small">...</div>
+                                                <div class="data-label">Saved Game App ID</div>
+                                                <div id="advAppID" class="data-value small">...</div>
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    <div class="tab-pane fade" id="advHexGrid" role="tabpanel">
+                                        <div class="d-flex justify-content-between align-items-center mb-2">
+                                            <span class="small text-muted">Hexadecimal Viewer (540 Bytes Bit by Bit)</span>
+                                            <div class="btn-group btn-group-toggle btn-group-sm" data-toggle="buttons">
+                                                <label class="btn btn-outline-secondary active" onclick="renderHexGrid('unpacked')">
+                                                    <input type="radio" name="hexType" checked> Decrypted
+                                                </label>
+                                                <label class="btn btn-outline-secondary" onclick="renderHexGrid('raw')">
+                                                    <input type="radio" name="hexType"> Raw Dump
+                                                </label>
+                                            </div>
+                                        </div>
+                                        <div id="hexContainer"></div>
+                                    </div>
                                 </div>
                             </div>
+
                         </div>
                     </div>
                 </div>
             </div>
 
-        </div> <div id="mainContent" class="tool-section" style="display: block; box-shadow: none; padding: 0; background: transparent;">
+        </div> 
+
+        <div id="mainContent" class="tool-section" style="display: block; box-shadow: none; padding: 0; background: transparent;">
             <div class="d-flex justify-content-between align-items-end mb-4 border-bottom border-secondary pb-3">
                 <div>
                     <h2 class="mb-0">Database Explorer</h2>
