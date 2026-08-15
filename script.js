@@ -5,7 +5,6 @@
  */
 
 // --- API CONFIGURATION ENGINE ---
-// Add new APIs here easily. The engine will fetch and merge them automatically.
 const API_CONFIGS = [
     {
         id: "main_api",
@@ -28,7 +27,7 @@ const API_CONFIGS = [
         name: "Extras",
         url: "extras.json",
         extractData: (json) => json.amiibo || [],
-        extractOrigin: (item) => item.customGroup || "Extras", // Uses customGroup dynamically
+        extractOrigin: (item) => item.customGroup || "Extras",
         mapData: (item) => ({
             id: ((item.head || "") + (item.tail || "")).toUpperCase(),
             name: item.name || "Unknown",
@@ -38,39 +37,20 @@ const API_CONFIGS = [
             releases: formatReleases(item.release),
             image: item.image || "./favicon.svg"
         })
-    },
-    /*
-    {
-        id: "main_api_backup",
-        name: "amiiboapi.org backup", 
-        url: "amiibo.json",
-        extractData: (json) => json.amiibo || [],
-        extractOrigin: (item) => "amiiboapi.org backup",
-        mapData: (item) => ({
-            id: ((item.head || "") + (item.tail || "")).toUpperCase(),
-            name: item.name || "Unknown",
-            series: item.amiiboSeries || "-",
-            gameSeries: item.gameSeries || "-",
-            type: item.type || "Figure",
-            releases: formatReleases(item.release),
-            image: item.image || "./favicon.svg"
-        })
-    }*/
-    
-    // Future Example:
-    // { url: "new-api.com/data", extractData: (json) => json.results, extractOrigin: () => "NewAPI", mapData: (item) => ({ id: item.rawId.replace("0x", ""), name: item.title ... }) }
+    }
 ];
 
 // --- GLOBAL STATE ---
 const STATE = {
-    database: [], // Will hold merged deduplicated items
+    database: [],
     table: null,
     keys: null, 
     defaults: {
         sigHex: "6769746875622e636f6d2f4c6974746c652d4e696768742d576f6c66",
         sigText: "github.com/n1ght-w01f"
     },
-    cryptoQueue: { data: null, filename: "" }
+    cryptoQueue: { data: null, filename: "" },
+    lastAnalysis: null
 };
 
 // --- CORE UTILITIES ---
@@ -80,6 +60,7 @@ const Utils = {
         for (let i = 0; i < hex.length; i += 2) bytes[i / 2] = parseInt(hex.substring(i, i + 2), 16);
         return bytes;
     },
+    bytesToHex: (bytes) => Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('').toUpperCase(),
     textToBytes: (text, length) => {
         let result = new Uint8Array(length);
         result.set(new TextEncoder().encode(text).slice(0, length));
@@ -133,11 +114,33 @@ const Utils = {
             toast.classList.remove('show');
             setTimeout(() => { if (container.contains(toast)) toast.remove(); }, 400); 
         }, 4000);
+    },
+    parseAmiiboDate: (val) => {
+        if (!val || val === 0 || val === 0xFFFF) return "Not Registered";
+        let day = val & 0x1F;
+        let month = (val >> 5) & 0x0F;
+        let rawYear = (val >> 9) & 0x7F;
+        let year = 2000 + rawYear;
+        
+        if (month < 1 || month > 12 || day < 1 || day > 31 || year < 2014 || year > 2026) {
+            return "Not Registered";
+        }
+        return `${year}-${String(month).padStart(2,'0')}-${String(day).padStart(2,'0')}`;
+    },
+    decodeUtf16LE: (bytes) => {
+        let str = "";
+        for (let i = 0; i < bytes.length; i += 2) {
+            let code = bytes[i] | (bytes[i + 1] << 8);
+            if (code === 0 || code === 0xFFFF) break;
+            if (code >= 32 && code !== 65533) {
+                str += String.fromCharCode(code);
+            }
+        }
+        return str.trim();
     }
 };
 
 // --- URL PARAMS MANAGER ---
-// Reads URL to set initial filters, and updates URL when filters change.
 const UrlSync = {
     updateURL: () => {
         const params = new URLSearchParams();
@@ -165,7 +168,7 @@ const UrlSync = {
         }
         if(params.has('origin')) {
             $('#filterOrigin').val(params.get('origin'));
-            STATE.table.column(5).search(params.get('origin')); // Column 5 is Origin(s)
+            STATE.table.column(5).search(params.get('origin'));
         }
         if(params.has('type')) {
             $('#filterType').val(params.get('type'));
@@ -189,7 +192,6 @@ window.switchTool = function(targetTool, prefillId = null) {
     
     if (targetTool === 'main') {
         $('#mainContent').fadeIn();
-        // Restore standard search params when going back to main
         UrlSync.updateURL(); 
     } else {
         $(`#${targetTool}Mode`).fadeIn();
@@ -270,48 +272,24 @@ async function encryptBuffer(unpackedArray) {
 async function generateAmiibo(idHex, customUid = null) {
     const cleanId = idHex.replace(/[^0-9A-Fa-f]/g, '').padEnd(16, '0');
     
-    // We must build the 'internal layout' expected by maboii.js, not the raw layout!
     const arr = new Uint8Array(540); 
     const idBytes = Utils.hexToBytes(cleanId);
     const uid = customUid ? Utils.hexToBytes(customUid) : Utils.generateRandomUID();
 
-    // Internal Header (BCC1, Internal, Lock0, Lock1, CC) -> Maps to 0x08 in Raw
     arr[0] = uid[8];
     arr.set([0x48, 0x0F, 0xE0, 0xF1, 0x10, 0xFF, 0xEE], 0x01);
-    
-    // Tag Settings -> Maps to 0x10 in Raw
     arr.set([0xA5, 0x00, 0x00, 0x00], 0x28);
-    
-    // UID -> Maps to 0x000 in Raw
     arr.set(uid, 0x1D4);
-    
-    // Amiibo ID -> Maps to 0x054 in Raw
-    // NOTE: The previous version incorrectly also wrote this to 0x54 in the internal buffer,
-    // which was mapping it to 0x0A8 (inside the save data) in the Raw buffer!
     arr.set(idBytes, 0x1DC);
     
-    // Salt -> Maps to 0x060 in Raw
     let salt = new Uint8Array(32); crypto.getRandomValues(salt);
     arr.set(salt, 0x1E8);
     
-    // NTAG Config Pages (130, 131, 132) -> Unmapped, stays at 0x208 in Raw
     arr.set([0x01, 0x00, 0x0F, 0xBD], 0x208);
     arr.set([0x00, 0x00, 0x00, 0x04], 0x20C);
     arr.set([0x5F, 0x00, 0x00, 0x00], 0x210);
     
-    let encryptedBody = await encryptBuffer(arr);
-    
-    /* 
-    // Watermark/Signature feature disabled as per user request to generate exact vanilla copies
-    // Leave for future reference:
-    let finalArr = new Uint8Array(572);
-    finalArr.set(encryptedBody);
-    let finalSig = Utils.textToBytes("github.com/n1ght-w01f", 16);
-    finalArr.set(finalSig, 540);
-    return finalArr;
-    */
-
-    return encryptedBody;
+    return await encryptBuffer(arr);
 }
 
 // --- PUBLIC ACTIONS ---
@@ -421,7 +399,6 @@ window.processSmartCrypto = async (file) => {
             document.getElementById('cryptoName').innerText = "Unknown Amiibo";
         }
 
-        // Bugfix: Ensure visibility resets cleanly
         const waitBox = document.getElementById('cryptoWaitBox');
         waitBox.classList.remove('d-flex');
         waitBox.style.display = 'none';
@@ -445,20 +422,20 @@ window.processAnalyzer = async (file) => {
     if(!file) file = document.getElementById('analyzeFileInput').files[0];
     if(!file) return;
 
-    const data = new Uint8Array(await file.arrayBuffer());
-    if (data.length < 520) { Utils.showToast("Analysis Failed", "File is too small to be an Amiibo.", "error"); return; }
+    const rawData = new Uint8Array(await file.arrayBuffer());
+    if (rawData.length < 520) { Utils.showToast("Analysis Failed", "File is too small to be an Amiibo.", "error"); return; }
 
-    let isEncrypted = (data[0x28] !== 0xA5);
-    if(!isEncrypted) { for (let i = 0; i < 8; i++) if (data[0x54 + i] !== data[0x1DC + i]) { isEncrypted = true; break; } }
+    let isEncrypted = (rawData[0x28] !== 0xA5);
+    if(!isEncrypted) { for (let i = 0; i < 8; i++) if (rawData[0x54 + i] !== rawData[0x1DC + i]) { isEncrypted = true; break; } }
 
-    let unpackedData = data;
+    let unpackedData = rawData;
     let dStatus = "decrypted"; 
 
     if (isEncrypted) {
         if (!STATE.keys || typeof maboii === 'undefined') dStatus = "failed_no_keys";
         else {
             try {
-                const res = await maboii.unpack(STATE.keys, Array.from(data.slice(0, 540)));
+                const res = await maboii.unpack(STATE.keys, Array.from(rawData.slice(0, 540)));
                 if (res && res.unpacked) {
                     unpackedData = new Uint8Array(res.unpacked);
                     dStatus = res.result ? "success_valid" : "success_modified";
@@ -467,11 +444,14 @@ window.processAnalyzer = async (file) => {
         }
     }
 
-    let idHex = "ERROR", uidHex = "ERROR", sigHex = "None", sigText = "None", nickname = "Not Set", miiOwner = "Not Set";
-    
+    let idHex = "ERROR", uidHex = "ERROR", nickname = "Not Set", miiOwner = "Not Set", miiAuthor = "Not Set", miiID = "Not Set";
+    let setupDate = "Not Registered", lastModDate = "Not Registered", writeCounter = 0, appId = "Not Set", gameDataSummary = "No save data registered";
+    let sigText = null;
+
     if (!dStatus.includes("failed")) {
-        idHex = Array.from(unpackedData.slice(0x1DC, 0x1DC+8)).map(b=>b.toString(16).padStart(2,'0')).join('');
-        uidHex = Array.from(unpackedData.slice(0x1D4, 0x1D4+9)).map(b=>b.toString(16).padStart(2,'0')).join('');
+        idHex = Utils.bytesToHex(unpackedData.slice(0x1DC, 0x1DC+8));
+        uidHex = Utils.bytesToHex(unpackedData.slice(0x1D4, 0x1D4+8)) + unpackedData[0].toString(16).padStart(2,'0').toUpperCase();
+        
         try {
             const arrData = Array.from(unpackedData);
             let rawNick = maboii.plainDataUtils.getNickName(arrData);
@@ -479,56 +459,172 @@ window.processAnalyzer = async (file) => {
             if(rawNick && rawNick.trim().length > 0 && rawNick.charCodeAt(0) !== 0) nickname = rawNick;
             if(rawMii && rawMii.trim().length > 0 && rawMii.charCodeAt(0) !== 0) miiOwner = rawMii;
         } catch(e) {}
+
+        // Mii Author Name
+        let authorBytes = unpackedData.slice(0x0A0, 0x0B4);
+        let decodedAuthor = Utils.decodeUtf16LE(authorBytes);
+        miiAuthor = (decodedAuthor && decodedAuthor.length > 0) ? decodedAuthor : "Not Set";
+
+        miiID = Utils.bytesToHex(unpackedData.slice(0x04C, 0x05C));
+
+        // Registry dates and write counter
+        let setupVal = unpackedData[0x032] | (unpackedData[0x033] << 8);
+        let modVal = unpackedData[0x034] | (unpackedData[0x035] << 8);
+        setupDate = Utils.parseAmiiboDate(setupVal);
+        lastModDate = Utils.parseAmiiboDate(modVal);
+        writeCounter = unpackedData[0x030] | (unpackedData[0x031] << 8);
+
+        // App ID
+        appId = Utils.bytesToHex(unpackedData.slice(0x0B4, 0x0BC));
+
+        // AppData Extractor
+        const appData = unpackedData.slice(0x0DC, 0x1B4);
+        if (appId.includes("1019C800") || idHex.startsWith("01010000000E0002")) {
+            let hearts = appData[0x02] & 0x3F;
+            gameDataSummary = (hearts > 0 && hearts <= 20) ? `🐺 Wolf Link Hearts: ${hearts} Hearts` : `🐺 Wolf Link Data (Default Hearts)`;
+        } else if (appId.includes("10118400") || appId.includes("1014F800")) {
+            let level = appData[0x00];
+            let exp = (appData[0x01] << 8) | appData[0x02];
+            gameDataSummary = (level > 0 && level <= 50) ? `⚔️ Super Smash Bros FP - Level: ${level} | EXP: ${exp}` : `⚔️ Super Smash Bros Saved Data`;
+        } else if (appId !== "0000000000000000") {
+            gameDataSummary = `🎮 Saved Data present for App ID: ${appId}`;
+        }
     }
 
-    if (data.length >= 572) {
-        const sigBytes = data.slice(540, 572);
-        sigHex = Array.from(sigBytes).map(b=>b.toString(16).padStart(2,'0')).join('');
-        const text = new TextDecoder("utf-8").decode(sigBytes).replace(/[\x00-\x1F\x7F-\x9F]/g, "");
-        sigText = text.trim() ? text : "(Binary Data)";
-    } else if (data.length > 540) sigHex = `Detected (${data.length - 540} extra bytes)`;
+    // Custom Signature
+    if (rawData.length >= 572) {
+        const sigBytes = rawData.slice(540, 572);
+        const text = new TextDecoder("utf-8").decode(sigBytes).replace(/[\x00-\x1F\x7F-\x9F]/g, "").trim();
+        if (text && text.length > 0) sigText = text;
+    }
 
-    const badges = {
-        "decrypted": '<span class="badge badge-secondary">Already decrypted (Plain text)</span>',
-        "success_valid": '<span class="badge badge-success">Encrypted (Original / Valid Signature)</span>',
-        "success_modified": '<span class="badge badge-warning text-dark">Encrypted (Custom / AppData modified)</span>',
-        "failed_no_keys": '<span class="badge badge-danger">Encrypted (No keys loaded to read)</span>',
-        "failed_bad_keys": '<span class="badge badge-danger">Encrypted (Decryption Failed - Bad keys?)</span>'
+    STATE.lastAnalysis = {
+        dStatus, idHex, uidHex, nickname, miiOwner, miiAuthor, miiID,
+        setupDate, lastModDate, writeCounter, appId, gameDataSummary, sigText,
+        rawData, unpackedData
     };
 
-    document.getElementById('resStatus').innerHTML = badges[dStatus];
-    document.getElementById('resID').innerText = idHex.toUpperCase();
-    document.getElementById('resUID').innerText = uidHex.toUpperCase();
-    document.getElementById('resNickname').innerText = nickname;
-    document.getElementById('resMii').innerText = miiOwner;
-    document.getElementById('resSigText').innerText = sigText;
+    const selector = document.getElementById('analyzerModeSelector');
+    if(selector) selector.style.display = 'flex';
+    
+    // Explicitly enforce default basic analysis mode
+    const viewModeElem = document.getElementById('analyzerViewMode');
+    if(viewModeElem) viewModeElem.value = 'basic';
+    
+    updateAnalyzerView();
+    Utils.showToast("Analysis Complete", "Data scanned successfully.", "success");
+};
 
-    if (!dStatus.includes("failed")) {
-        Utils.showToast("Analysis Complete", "Internal data extracted successfully.", "success");
-        const dbMatch = STATE.database.find(a => a.id === idHex.toUpperCase());
-        if (dbMatch) {
-            document.getElementById('resImage').src = dbMatch.main.image;
-            document.getElementById('resName').innerText = dbMatch.main.name;
-            document.getElementById('resSeries').innerText = dbMatch.main.series;
-        } else {
-            // Fallback for unknown IDs just in case it's on the main API but our DB didn't load
-            fetch(`https://amiiboapi.org/api/amiibo/?id=${idHex.toLowerCase()}`)
-                .then(r => r.json()).then(d => {
-                    document.getElementById('resImage').src = d.amiibo.image;
-                    document.getElementById('resName').innerText = d.amiibo.name;
-                    document.getElementById('resSeries').innerText = d.amiibo.amiiboSeries;
-                }).catch(() => {
-                    document.getElementById('resName').innerText = "Unknown Custom Amiibo";
-                    document.getElementById('resImage').src = "./favicon.svg";
-                    document.getElementById('resSeries').innerText = "---";
-                });
+window.updateAnalyzerView = () => {
+    const a = STATE.lastAnalysis;
+    if (!a) return;
+
+    const mode = document.getElementById('analyzerViewMode') ? document.getElementById('analyzerViewMode').value : 'basic';
+    const basicBox = document.getElementById('analyzerBasicView');
+    const advBox = document.getElementById('analyzerAdvancedView');
+
+    if (mode === 'basic' && basicBox && advBox) {
+        basicBox.style.display = 'block';
+        advBox.style.display = 'none';
+
+        const badges = {
+            "decrypted": '<span class="badge badge-secondary">Already decrypted (Plain text)</span>',
+            "success_valid": '<span class="badge badge-success">Encrypted (Original / Valid Signature)</span>',
+            "success_modified": '<span class="badge badge-warning text-dark">Encrypted (Custom / AppData modified)</span>',
+            "failed_no_keys": '<span class="badge badge-danger">Encrypted (No keys loaded)</span>',
+            "failed_bad_keys": '<span class="badge badge-danger">Encrypted (Decryption Failed)</span>'
+        };
+
+        document.getElementById('resStatus').innerHTML = badges[a.dStatus] || '---';
+        document.getElementById('resID').innerText = a.idHex;
+        document.getElementById('resUID').innerText = a.uidHex;
+        document.getElementById('resNickname').innerText = a.nickname;
+        document.getElementById('resMii').innerText = a.miiOwner;
+
+        const sigContainer = document.getElementById('resSigContainer');
+        if (sigContainer) {
+            if (a.sigText) {
+                document.getElementById('resSigText').innerText = a.sigText;
+                sigContainer.style.display = 'block';
+            } else {
+                sigContainer.style.display = 'none';
+            }
         }
-    } else {
-        Utils.showToast("Read Error", "Could not penetrate encryption. Check your keys.", "error");
-        document.getElementById('resName').innerText = "Unreadable File";
-        document.getElementById('resImage').src = "./favicon.svg";
-        document.getElementById('resSeries').innerText = "---";
+
+        const dbMatch = STATE.database.find(item => item.id === a.idHex);
+        document.getElementById('resImage').src = dbMatch ? dbMatch.main.image : "./favicon.svg";
+        document.getElementById('resName').innerText = dbMatch ? dbMatch.main.name : "Custom / Unknown";
+        document.getElementById('resSeries').innerText = dbMatch ? dbMatch.main.series : "---";
+
+    } else if (advBox) {
+        if(basicBox) basicBox.style.display = 'none';
+        advBox.style.display = 'block';
+
+        const dbMatch = STATE.database.find(item => item.id === a.idHex);
+        document.getElementById('advResImage').src = dbMatch ? dbMatch.main.image : "./favicon.svg";
+        document.getElementById('advResName').innerText = dbMatch ? dbMatch.main.name : "Custom / Unknown";
+        document.getElementById('advResSeries').innerText = dbMatch ? dbMatch.main.series : "---";
+
+        document.getElementById('advFullID').innerText = a.idHex;
+        document.getElementById('advHeadTail').innerText = `Head: ${a.idHex.slice(0,8)} | Tail: ${a.idHex.slice(8,16)}`;
+        document.getElementById('advFullUID').innerText = a.uidHex;
+        document.getElementById('advSecBadge').innerHTML = `<span class="badge badge-info">${a.dStatus}</span>`;
+        document.getElementById('advWriteCount').innerText = `${a.writeCounter} write(s)`;
+        
+        document.getElementById('advDates').innerText = `Init: ${a.setupDate} | Last: ${a.lastModDate}`;
+
+        document.getElementById('advNick').innerText = a.nickname;
+        document.getElementById('advMiiName').innerText = a.miiOwner;
+        document.getElementById('advMiiAuthor').innerText = a.miiAuthor;
+        document.getElementById('advMiiID').innerText = a.miiID;
+        document.getElementById('advAppID').innerText = a.appId;
+
+        let gameDataElem = document.getElementById('advGameDataSummary');
+        if(!gameDataElem) {
+            const container = document.getElementById('advAppData');
+            if(container) {
+                const newDiv = document.createElement('div');
+                newDiv.className = "row border-top border-secondary pt-2 mt-2";
+                newDiv.innerHTML = `<div class="col-12"><div class="data-label">💾 Game Save Info / AppData Analysis</div><div id="advGameDataSummary" class="data-value text-warning">...</div></div>`;
+                container.appendChild(newDiv);
+            }
+        }
+        if(document.getElementById('advGameDataSummary')) {
+            document.getElementById('advGameDataSummary').innerText = a.gameDataSummary;
+        }
+
+        renderHexGrid('unpacked');
     }
+};
+
+window.renderHexGrid = (type) => {
+    const a = STATE.lastAnalysis;
+    if (!a) return;
+    const bytes = (type === 'raw') ? a.rawData : a.unpackedData;
+    const container = document.getElementById('hexContainer');
+
+    let html = '<div style="max-height: 280px; overflow-y: auto; background: #121212; border-radius: 6px; padding: 10px;">';
+    html += '<table class="table table-sm table-dark table-borderless hex-table mb-0"><thead><tr class="text-muted border-bottom border-secondary"><th>Offset</th><th>00 01 02 03 04 05 06 07 08 09 0A 0B 0C 0D 0E 0F</th><th>ASCII</th></tr></thead><tbody>';
+
+    for (let i = 0; i < bytes.length && i < 540; i += 16) {
+        let offset = '0x' + i.toString(16).padStart(4, '0').toUpperCase();
+        let chunk = bytes.slice(i, i + 16);
+        let hexStr = '';
+        let asciiStr = '';
+
+        for (let j = 0; j < 16; j++) {
+            if (j < chunk.length) {
+                let b = chunk[j];
+                hexStr += b.toString(16).padStart(2, '0').toUpperCase() + ' ';
+                asciiStr += (b >= 32 && b <= 126) ? String.fromCharCode(b) : '.';
+            } else hexStr += '   ';
+        }
+
+        html += `<tr><td class="text-warning">${offset}</td><td class="text-info">${hexStr}</td><td class="text-muted">${asciiStr}</td></tr>`;
+    }
+
+    html += '</tbody></table></div>';
+    container.innerHTML = html;
 };
 
 const formatReleases = (release) => {
@@ -541,7 +637,6 @@ const formatReleases = (release) => {
     return parts.length > 0 ? parts.join('<br>') : "-";
 };
 
-// Formatting function for Duplicate Amiibo dropdowns
 function formatChildRow(entry) {
     let html = '<div class="p-3 bg-dark rounded border border-secondary" style="margin: 5px 0;"><h6 class="text-info mb-3">Available Versions / Sources</h6><div class="row">';
     entry.sources.forEach(src => {
@@ -556,7 +651,6 @@ function formatChildRow(entry) {
                     <strong class="d-block mb-1">${src.name}</strong>
                     <small class="d-block text-light mb-1">Series: ${src.series}</small>
                     <small class="d-block text-light mb-3">Type: ${src.type}</small>
-                    <!-- <button class="btn btn-sm btn-danger btn-block font-weight-bold" onclick="downloadSingle('${src.name.replace(/'/g, "\\'")}','${entry.id}')">Download Version</button> -->
                 </div>
             </div>
         </div>`;
@@ -568,7 +662,6 @@ function formatChildRow(entry) {
 
 // --- CORE SYSTEM INITIALIZATION ---
 document.addEventListener('DOMContentLoaded', async function() {
-    
     if (typeof jQuery === 'undefined' || typeof $ === 'undefined') {
         document.getElementById('dbStats').innerHTML = `<span class="text-danger">⚠️ Error: External libraries blocked. Check your ad-blocker or connection.</span>`;
         return;
@@ -600,31 +693,15 @@ document.addEventListener('DOMContentLoaded', async function() {
         }
     });
 
-    // Multi-API Fetch & Aggregate Logic
     try {
         console.log("📡 Connecting to data sources...");
-        
         const aggregationMap = new Map();
         let totalItemsFetched = 0;
 
         for (const config of API_CONFIGS) {
             try {
-                let response;
-                try {
-                    response = await fetch(config.url);
-                    if(!response.ok) throw new Error("HTTP " + response.status);
-                } catch (fetchErr) {
-                    if (config.url.startsWith("https://")) {
-                        console.warn(`[API Fallback] Error fetching ${config.url} via HTTPS:`, fetchErr);
-                        console.log(`[API Fallback] Attempting fallback to HTTP for ${config.name}...`);
-                        alert(`⚠️ Warning: Failed to load data from ${config.name} via HTTPS.\nRetrying with HTTP...`);
-                        const fallbackUrl = config.url.replace("https://", "http://");
-                        response = await fetch(fallbackUrl);
-                        if(!response.ok) throw new Error("HTTP " + response.status + " on fallback");
-                    } else {
-                        throw fetchErr;
-                    }
-                }
+                let response = await fetch(config.url);
+                if(!response.ok) throw new Error("HTTP " + response.status);
                 
                 const rawJson = await response.json();
                 const itemsList = config.extractData(rawJson);
@@ -641,7 +718,7 @@ document.addEventListener('DOMContentLoaded', async function() {
                     } else {
                         aggregationMap.set(mapped.id, {
                             id: mapped.id,
-                            main: sourceInfo, // Visual defaults to first found
+                            main: sourceInfo,
                             sources: [sourceInfo]
                         });
                     }
@@ -650,7 +727,6 @@ document.addEventListener('DOMContentLoaded', async function() {
                 console.log(`✅ ${config.name} loaded. (Items: ${itemsList.length})`);
             } catch (err) {
                 console.warn(`⚠️ Warning: Failed to load data from ${config.name}`, err);
-                alert(`⚠️ Warning: Failed to load data from ${config.name}`);
             }
         }
 
@@ -663,12 +739,11 @@ document.addEventListener('DOMContentLoaded', async function() {
             document.getElementById('dbStats').innerText = `${STATE.database.length} unique amiibos (${totalItemsFetched} total)`;
         }
 
-        // Initialize DataTables
         STATE.table = $('#dataTable').DataTable({ 
             dom: '<"row"<"col-sm-12"l>>rt<"row"<"col-sm-12 col-md-5"i><"col-sm-12 col-md-7"p>>',
             columnDefs: [
-                { orderable: false, targets: [0, 1, 7] }, // Expand, Image, Actions non-sortable
-                { targets: [8, 9], visible: false } // Hidden for filtering
+                { orderable: false, targets: [0, 1, 7] },
+                { targets: [8, 9], visible: false }
             ], 
             pageLength: 20, 
             order: [[2, 'asc']] 
@@ -692,16 +767,13 @@ document.addEventListener('DOMContentLoaded', async function() {
             if(m.type.toLowerCase() === "yarn") typeIcon = "🧶";
             if(m.type.toLowerCase() === "band") typeIcon = "⌚";
 
-            // Expand Button if duplicates exist. Using flexbox wrapper for large clickable area.
             const expandCell = entry.sources.length > 1 
                 ? `<span class="badge badge-danger badge-pill duplicate-badge" title="Multiple sources available">${entry.sources.length}</span>` 
                 : ``;
 
-            // Deduplicate origins for the Origin(s) column
             const uniqueOrigins = [...new Set(entry.sources.map(s => s.origin))].sort();
             const originBadges = uniqueOrigins.map(org => `<span class="badge badge-secondary badge-origin">${org}</span>`).join('');
 
-            // Add row
             const rowNode = STATE.table.row.add([
                 entry.sources.length > 1 ? `<div class="details-control-wrapper">${expandCell}</div>` : '',
                 `<div class="amiibo-image"><img loading="lazy" src="${m.image}" onerror="this.src='./favicon.svg'"></div>`,
@@ -721,7 +793,6 @@ document.addEventListener('DOMContentLoaded', async function() {
         
         STATE.table.draw();
 
-        // Bind Expand/Collapse Event
         $('#dataTable tbody').on('click', 'td.details-control', function () {
             const tr = $(this).closest('tr');
             const row = STATE.table.row(tr);
@@ -737,7 +808,6 @@ document.addEventListener('DOMContentLoaded', async function() {
             }
         });
 
-        // Filter Dropdown Population (using all unique origins found across all sources)
         const allOrigins = [...new Set(STATE.database.flatMap(entry => entry.sources.map(s => s.origin)))].sort();
         $('#filterOrigin').empty().append(new Option("All Origins", ""));
         allOrigins.forEach(opt => $('#filterOrigin').append(new Option(opt, opt)));
@@ -754,10 +824,8 @@ document.addEventListener('DOMContentLoaded', async function() {
         fillSelect('#filterSeries', 'series');
         fillSelect('#filterGameSeries', 'gameSeries');
 
-        // Apply URL Filters FIRST
         UrlSync.applyFromURL();
 
-        // Bind Events to update URL and Filter Table
         $('.filter-input').on('change keyup', function() {
             UrlSync.updateURL();
             
@@ -767,7 +835,6 @@ document.addEventListener('DOMContentLoaded', async function() {
             const series = $('#filterSeries').val();
             const gSeries = $('#filterGameSeries').val();
 
-            // Apply filters. Note: column 5 is Origin(s)
             STATE.table.search(search)
                        .column(5).search(origin)
                        .column(9).search(type)
