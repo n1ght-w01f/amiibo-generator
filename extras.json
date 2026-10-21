@@ -1,23 +1,6 @@
 {
   "amiibo": [
     {
-      "amiiboSeries": "Legend Of Zelda",
-      "character": "Mineru",
-      "gameSeries": "The Legend of Zelda",
-      "head": "010D0000",
-      "tail": "04A70902",
-      "image": "extra-images/mineru-s-construct.png",
-      "name": "Mineru's Construct",
-      "release": {
-				"au": null,
-				"eu": null,
-				"jp": null,
-				"na": null
-			},
-      "type": "Figure",
-      "customGroup": "Leaked"
-    },
-    {
       "amiiboSeries": "Super Nintendo World",
       "character": "Mario",
       "gameSeries": "Super Mario",
