@@ -2,6 +2,7 @@
  * Amiibo Generator Pro - Modern Refactored Logic
  * Fully prepared for GitHub Pages deployment & API Scraping.
  * Features: Auto-Encryption, Smart Toasts, Multi-API Engine, GET URL Filters, Duplicate Aggregation.
+ * FIXED
  */
 
 // --- API CONFIGURATION ENGINE ---
