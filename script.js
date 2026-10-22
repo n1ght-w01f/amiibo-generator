@@ -74,6 +74,17 @@ const Utils = {
         uid[8] = (uid[4] ^ uid[5] ^ uid[6] ^ uid[7]) & 0xFF; 
         return uid;
     },
+    isDecryptedDump: (data) => {
+        // A decrypted (internal format) dump keeps the vanilla header at
+        // 0x01-0x07 and the initialized flag (0xA5) at 0x28. Encrypted raw
+        // dumps never match both, so this reliably detects the file state.
+        if (data[0x28] !== 0xA5) return false;
+        const header = [0x48, 0x0F, 0xE0, 0xF1, 0x10, 0xFF, 0xEE];
+        for (let i = 0; i < header.length; i++) {
+            if (data[0x01 + i] !== header[i]) return false;
+        }
+        return true;
+    },
     downloadBlob: (data, filename) => {
         const blob = new Blob([data], { type: "application/octet-stream" });
         const url = URL.createObjectURL(blob);
@@ -232,6 +243,10 @@ async function handleKeyUpload(file) {
             localStorage.setItem('maboii_keys_v2', JSON.stringify(keyData));
             updateKeyUI(true);
             Utils.showToast("Keys Loaded", "Encryption and decryption are ready.", "success");
+        } else {
+            STATE.keys = null;
+            updateKeyUI(false);
+            Utils.showToast("Key Error", "The master key data is not valid.", "error");
         }
     } catch (err) { Utils.showToast("Critical Error", "Invalid keys format or file is corrupted.", "error"); }
 }
@@ -255,22 +270,27 @@ window.clearKeys = function() {
 // --- ENCRYPTION LOGIC ---
 async function encryptBuffer(unpackedArray) {
     if (!STATE.keys || typeof maboii === 'undefined') return unpackedArray;
-    try {
-        const magic = [0x48, 0x0F, 0xE0, 0xF1, 0x10, 0xFF, 0xEE, 0xA5];
-        magic.forEach((val, i) => unpackedArray[9 + i] = val);
 
-        let packed = await maboii.pack(STATE.keys, Array.from(unpackedArray));
-        packed[8] = packed[4] ^ packed[5] ^ packed[6] ^ packed[7]; 
-        const pwd = [ (0xAA ^ packed[1] ^ packed[4]) & 0xFF, (0x55 ^ packed[2] ^ packed[5]) & 0xFF, (0xAA ^ packed[4] ^ packed[6]) & 0xFF, (0x55 ^ packed[5] ^ packed[7]) & 0xFF ];
-        packed.splice(532, 6, pwd[0], pwd[1], pwd[2], pwd[3], 0x80, 0x80);
+    let packed = Array.from(await maboii.pack(STATE.keys, Array.from(unpackedArray)));
+    packed[8] = packed[4] ^ packed[5] ^ packed[6] ^ packed[7]; // BCC1
+    // NTAG215 password (PWD_AUTH) as derived by the console from the tag UID:
+    // PWD0 = 0xAA ^ UID1 ^ BCC0, PWD1 = 0x55 ^ UID2 ^ UID3,
+    // PWD2 = 0xAA ^ BCC0 ^ UID4, PWD3 = 0x55 ^ UID3 ^ UID5
+    const pwd = [
+        (0xAA ^ packed[1] ^ packed[3]) & 0xFF,
+        (0x55 ^ packed[2] ^ packed[4]) & 0xFF,
+        (0xAA ^ packed[3] ^ packed[5]) & 0xFF,
+        (0x55 ^ packed[4] ^ packed[6]) & 0xFF
+    ];
+    packed.splice(532, 6, pwd[0], pwd[1], pwd[2], pwd[3], 0x80, 0x80);
 
-        return new Uint8Array(packed);
-    } catch (e) { return unpackedArray; }
+    return new Uint8Array(packed);
 }
 
 // --- DATA GENERATORS ---
 async function generateAmiibo(idHex, customUid = null) {
-    const cleanId = idHex.replace(/[^0-9A-Fa-f]/g, '').padEnd(16, '0');
+    const cleanId = idHex.replace(/[^0-9A-Fa-f]/g, '').toUpperCase();
+    if (cleanId.length !== 16) throw new Error("Amiibo ID must be exactly 16 hexadecimal characters");
     
     const arr = new Uint8Array(540); 
     const idBytes = Utils.hexToBytes(cleanId);
@@ -304,10 +324,11 @@ window.downloadSingle = async (name, id) => {
 };
 
 window.downloadAdvanced = async () => {
-    const id = document.getElementById('advId').value;
-    const uid = document.getElementById('advUID').value.replace(/\s/g, '');
-    if (uid.length !== 18) { Utils.showToast("Invalid Format", "UID must be exactly 18 Hexadecimal characters.", "warning"); return; }
-    
+    const id = document.getElementById('advId').value.replace(/[^0-9A-Fa-f]/g, '').toUpperCase();
+    const uid = document.getElementById('advUID').value.replace(/\s/g, '').toUpperCase();
+    if (id.length !== 16) { Utils.showToast("Invalid Format", "Amiibo ID must be exactly 16 Hexadecimal characters.", "warning"); return; }
+    if (!/^[0-9A-F]{18}$/.test(uid)) { Utils.showToast("Invalid Format", "UID must be exactly 18 Hexadecimal characters.", "warning"); return; }
+
     try {
         const data = await generateAmiibo(id, uid);
         Utils.downloadBlob(data, `custom_${id}_${STATE.keys ? "ENC" : "DEC"}.bin`);
@@ -346,8 +367,7 @@ window.processSmartCrypto = async (file) => {
         const data = new Uint8Array(await file.arrayBuffer());
         if (data.length < 520) { Utils.showToast("Invalid File", "File is too small to be an Amiibo dump.", "warning"); return; }
 
-        let isEncrypted = (data[0x28] !== 0xA5);
-        if(!isEncrypted) { for (let i = 0; i < 8; i++) { if (data[0x54 + i] !== data[0x1DC + i]) { isEncrypted = true; break; } } }
+        const isEncrypted = !Utils.isDecryptedDump(data);
 
         let finalData = null;
         let originalStateText = "";
@@ -369,6 +389,14 @@ window.processSmartCrypto = async (file) => {
                     Utils.showToast("Forced Decryption", "Modifications detected (Saved Mii or emulator). File recovered.", "warning");
                 }
                 
+                if (data.length > 540) {
+                    // Keep trailing data (e.g. custom signatures) untouched.
+                    const extended = new Uint8Array(data.length);
+                    extended.set(finalData);
+                    extended.set(data.slice(540), 540);
+                    finalData = extended;
+                }
+
                 STATE.cryptoQueue.data = finalData;
                 STATE.cryptoQueue.filename = `${file.name.replace('.bin','')} [DECRYPTED].bin`;
             } else throw new Error("unpack failed");
@@ -425,8 +453,7 @@ window.processAnalyzer = async (file) => {
     const rawData = new Uint8Array(await file.arrayBuffer());
     if (rawData.length < 520) { Utils.showToast("Analysis Failed", "File is too small to be an Amiibo.", "error"); return; }
 
-    let isEncrypted = (rawData[0x28] !== 0xA5);
-    if(!isEncrypted) { for (let i = 0; i < 8; i++) if (rawData[0x54 + i] !== rawData[0x1DC + i]) { isEncrypted = true; break; } }
+    const isEncrypted = !Utils.isDecryptedDump(rawData);
 
     let unpackedData = rawData;
     let dStatus = "decrypted"; 
@@ -460,22 +487,22 @@ window.processAnalyzer = async (file) => {
             if(rawMii && rawMii.trim().length > 0 && rawMii.charCodeAt(0) !== 0) miiOwner = rawMii;
         } catch(e) {}
 
-        // Mii Author Name
-        let authorBytes = unpackedData.slice(0x0A0, 0x0B4);
+        // Mii Author Name (20 bytes, UTF-16LE, inside the owner Mii block)
+        let authorBytes = unpackedData.slice(0x094, 0x0A8);
         let decodedAuthor = Utils.decodeUtf16LE(authorBytes);
         miiAuthor = (decodedAuthor && decodedAuthor.length > 0) ? decodedAuthor : "Not Set";
 
         miiID = Utils.bytesToHex(unpackedData.slice(0x04C, 0x05C));
 
-        // Registry dates and write counter
-        let setupVal = unpackedData[0x032] | (unpackedData[0x033] << 8);
-        let modVal = unpackedData[0x034] | (unpackedData[0x035] << 8);
+        // Registry dates (big-endian u16) and write counter (big-endian u16 at 0x29)
+        let setupVal = (unpackedData[0x030] << 8) | unpackedData[0x031];
+        let modVal = (unpackedData[0x032] << 8) | unpackedData[0x033];
         setupDate = Utils.parseAmiiboDate(setupVal);
         lastModDate = Utils.parseAmiiboDate(modVal);
-        writeCounter = unpackedData[0x030] | (unpackedData[0x031] << 8);
+        writeCounter = (unpackedData[0x029] << 8) | unpackedData[0x02A];
 
-        // App ID
-        appId = Utils.bytesToHex(unpackedData.slice(0x0B4, 0x0BC));
+        // App ID (big-endian u32)
+        appId = Utils.bytesToHex(unpackedData.slice(0x0B6, 0x0BA));
 
         // AppData Extractor
         const appData = unpackedData.slice(0x0DC, 0x1B4);
@@ -486,7 +513,7 @@ window.processAnalyzer = async (file) => {
             let level = appData[0x00];
             let exp = (appData[0x01] << 8) | appData[0x02];
             gameDataSummary = (level > 0 && level <= 50) ? `⚔️ Super Smash Bros FP - Level: ${level} | EXP: ${exp}` : `⚔️ Super Smash Bros Saved Data`;
-        } else if (appId !== "0000000000000000") {
+        } else if (appId !== "00000000") {
             gameDataSummary = `🎮 Saved Data present for App ID: ${appId}`;
         }
     }
@@ -672,6 +699,7 @@ document.addEventListener('DOMContentLoaded', async function() {
         try {
             STATE.keys = maboii.loadMasterKeys(JSON.parse(savedKeys));
             if(STATE.keys) updateKeyUI(true);
+            else localStorage.removeItem('maboii_keys_v2');
         } catch (e) { localStorage.removeItem('maboii_keys_v2'); }
     }
     
